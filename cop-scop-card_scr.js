@@ -1,10 +1,10 @@
 // /config/www/cop-scop-card.js
 // COP/SCOP Card – LTS stats + GUI editor + aux heater + responsive table
-// v1.3.5 - Added "Aux included" toggle for flexible calculations + caching
+// v1.4.0 - Added automatic unit normalization to kWh + manual scale overrides
 
 /* eslint-disable no-console */
 
-const CSC_VERSION = "1.3.5";
+const CSC_VERSION = "1.4.0";
 
 // --- Lit loader with CDN fallback ---
 let Lit, __litFromCDN = false;
@@ -63,11 +63,16 @@ const STRINGS = {
     class_eu_lt: "EU space heating LOW-TEMP (orientačně)",
     thresholds: "Prahy tříd (min COP/SCOP)",
     class_style: "Styl tříd (text + barva)",
-    add_aux: "Přídavné topení (kWh) – entita",
-    add_aux2: "Přídavné topení #2 (kWh) – entita",
+    add_aux: "Přídavné topení – entita",
+    add_aux2: "Přídavné topení #2 – entita",
     aux_included: "Přídavné topení je již zahrnuto ve spotřebě",
-    produced_entity: "Výroba (kWh) – entita",
-    consumed_entity: "Spotřeba (kWh) – entita",
+    produced_entity: "Výroba – entita",
+    consumed_entity: "Spotřeba – entita",
+    produced_scale: "Výroba – scale override do kWh",
+    consumed_scale: "Spotřeba – scale override do kWh",
+    aux_scale: "Aux #1 – scale override do kWh",
+    aux2_scale: "Aux #2 – scale override do kWh",
+    unit_warning: "Některé entity mají nepodporovanou jednotku. Nastav ručně scale override do kWh.",
     enabled: "Povoleno",
     name: "Název",
     refresh: "Refresh (min)",
@@ -106,11 +111,16 @@ const STRINGS = {
     class_eu_lt: "EU space heating LOW-TEMP (approx.)",
     thresholds: "Class thresholds (min COP/SCOP)",
     class_style: "Class style (label + color)",
-    add_aux: "Aux heater (kWh) – entity",
-    add_aux2: "Aux heater #2 (kWh) – entity",
+    add_aux: "Aux heater – entity",
+    add_aux2: "Aux heater #2 – entity",
     aux_included: "Aux heater already included in consumption",
-    produced_entity: "Produced (kWh) – entity",
-    consumed_entity: "Consumed (kWh) – entity",
+    produced_entity: "Produced – entity",
+    consumed_entity: "Consumed – entity",
+    produced_scale: "Produced scale override to kWh",
+    consumed_scale: "Consumed scale override to kWh",
+    aux_scale: "Aux #1 scale override to kWh",
+    aux2_scale: "Aux #2 scale override to kWh",
+    unit_warning: "Some entities use an unsupported unit. Set a manual scale override to kWh.",
     enabled: "Enabled",
     name: "Name",
     refresh: "Refresh (min)",
@@ -154,6 +164,14 @@ const pickClass = (ratio, thresholdsMap) => {
 };
 
 const formatNum = (v, precision) => (v == null || !Number.isFinite(v)) ? "—" : Number(v).toFixed(precision);
+const ENERGY_UNIT_FACTORS = { wh: 0.001, kwh: 1, mwh: 1000 };
+const normalizeEnergyUnit = (unit) => String(unit || "").trim().toLowerCase().replace(/\s+/g, "");
+const parseScaleOverride = (value) => {
+  if (value === "" || value == null) return null;
+  const num = Number(value);
+  return Number.isFinite(num) && num > 0 ? num : null;
+};
+const scaleToKwh = (value, factor) => (value == null || !Number.isFinite(value)) ? value : value * factor;
 
 const PERIODS = [
   { key: "day", label: "24h", kind: "cop", days: 1, group: "hour" },
@@ -184,17 +202,17 @@ const DEFAULT_CONFIG = {
   mode: "single", precision: 2, refresh_minutes: 60, month_days: 30, year_days: 365, show_classes: true, colorize_table_classes: true, class_mode: "custom",
   custom_class_thresholds: { ...DEFAULT_THRESHOLDS_CUSTOM }, class_colors: { ...DEFAULT_CLASS_COLORS }, class_labels: { ...DEFAULT_CLASS_LABELS },
   categories: [
-    { key: "dhw", name: "TUV", enabled: true, produced_entity: "", consumed_entity: "", aux_entity: "", aux_included: false },
-    { key: "heating", name: "Topení", enabled: true, produced_entity: "", consumed_entity: "", aux_entity: "", aux_included: false },
-    { key: "cooling", name: "Chlazení", enabled: true, produced_entity: "", consumed_entity: "", aux_entity: "", aux_included: false },
-    { key: "total", name: "Celkem", enabled: true, produced_entity: "", consumed_entity: "", aux_entity: "", aux_entity2: "", aux_included: false },
+    { key: "dhw", name: "TUV", enabled: true, produced_entity: "", consumed_entity: "", aux_entity: "", aux_included: false, produced_scale: null, consumed_scale: null, aux_scale: null },
+    { key: "heating", name: "Topení", enabled: true, produced_entity: "", consumed_entity: "", aux_entity: "", aux_included: false, produced_scale: null, consumed_scale: null, aux_scale: null },
+    { key: "cooling", name: "Chlazení", enabled: true, produced_entity: "", consumed_entity: "", aux_entity: "", aux_included: false, produced_scale: null, consumed_scale: null, aux_scale: null },
+    { key: "total", name: "Celkem", enabled: true, produced_entity: "", consumed_entity: "", aux_entity: "", aux_entity2: "", aux_included: false, produced_scale: null, consumed_scale: null, aux_scale: null, aux2_scale: null },
   ],
 };
 
 // -------------------- CARD --------------------
 class CopScopCard extends LitElement {
   static get properties() {
-    return { hass: {}, _config: { state: true }, _data: { state: true }, _error: { state: true }, _loading: { state: true }, _lastFetch: { state: true }, _selectedKey: { state: true }, _w: { state: true } };
+    return { hass: {}, _config: { state: true }, _data: { state: true }, _error: { state: true }, _warning: { state: true }, _loading: { state: true }, _lastFetch: { state: true }, _selectedKey: { state: true }, _w: { state: true } };
   }
 
   static getConfigElement() { return document.createElement("cop-scop-card-editor"); }
@@ -241,7 +259,7 @@ class CopScopCard extends LitElement {
     .mTileVal{ font-size: 1.25rem; font-weight: 900; font-variant-numeric: tabular-nums; }
   `;
 
-  constructor() { super(); this._config = null; this._data = null; this._loading = false; this._lastFetch = 0; this._selectedKey = "total"; this._w = 9999; this.__ro = null; }
+  constructor() { super(); this._config = null; this._data = null; this._error = null; this._warning = null; this._loading = false; this._lastFetch = 0; this._selectedKey = "total"; this._w = 9999; this.__ro = null; }
 
   setConfig(config) {
     const cfg = config || {};
@@ -291,6 +309,19 @@ class CopScopCard extends LitElement {
     return html`<span class="badge" style="background:${bg}; color:${colorize ? "rgba(0,0,0,0.85)" : "var(--primary-text-color)"}; border-color:${colorize ? "transparent" : "rgba(255,255,255,0.16)"};">${label}</span>`;
   }
 
+  _getEntityScaleMeta(entityId, override) {
+    const manualFactor = parseScaleOverride(override);
+    if (manualFactor != null) return { factor: manualFactor, manual: true, unit: "kWh" };
+
+    const unit = this.hass?.states?.[entityId]?.attributes?.unit_of_measurement;
+    const normalizedUnit = normalizeEnergyUnit(unit);
+    if (normalizedUnit && ENERGY_UNIT_FACTORS[normalizedUnit] != null) {
+      return { factor: ENERGY_UNIT_FACTORS[normalizedUnit], manual: false, unit };
+    }
+
+    return { factor: 1, manual: false, unit, unsupported: Boolean(unit) };
+  }
+
   async _fetchIfNeeded() {
     if (!this.hass || !this._config || this._loading) return;
     const refreshMs = clampNumber(this._config.refresh_minutes, 60) * 60 * 1000;
@@ -299,10 +330,11 @@ class CopScopCard extends LitElement {
     const ids = this._getAllEntityIds();
     if (ids.length === 0) { this._error = t(this.hass, "missing_cfg", this._config); return; }
     
-    this._loading = true; this._error = null;
+    this._loading = true; this._error = null; this._warning = null;
     try {
       const now = new Date();
       const resultsByPeriod = {};
+      const warnings = new Set();
       for (const p of PERIODS) {
         const resp = await this.hass.callWS({ type: "recorder/statistics_during_period", start_time: periodStart(now, this._config, p).toISOString(), end_time: now.toISOString(), statistic_ids: ids, period: p.group, types: ["change", "sum", "state"] });
         resultsByPeriod[p.key] = { changes: {} };
@@ -312,22 +344,31 @@ class CopScopCard extends LitElement {
       const categories = {};
       for (const c of this._getEnabledCategories()) {
         const cat = { name: c.name, key: c.key, periods: {} };
+        const producedMeta = this._getEntityScaleMeta(c.produced_entity, c.produced_scale);
+        const consumedMeta = this._getEntityScaleMeta(c.consumed_entity, c.consumed_scale);
+        const aux1Meta = this._getEntityScaleMeta(c.aux_entity, c.aux_scale);
+        const aux2Meta = this._getEntityScaleMeta(c.aux_entity2, c.aux2_scale);
+        [[c.produced_entity, producedMeta], [c.consumed_entity, consumedMeta], [c.aux_entity, aux1Meta], [c.aux_entity2, aux2Meta]].forEach(([entityId, meta]) => {
+          if (entityId && meta?.unsupported) warnings.add(entityId);
+        });
         for (const p of PERIODS) {
           const res = resultsByPeriod[p.key].changes;
-          const prod = res[c.produced_entity], consMain = res[c.consumed_entity];
-          const aux1 = res[c.aux_entity] || 0, aux2 = res[c.aux_entity2] || 0;
+          const prod = scaleToKwh(res[c.produced_entity], producedMeta.factor);
+          const consMain = scaleToKwh(res[c.consumed_entity], consumedMeta.factor);
+          const aux1 = scaleToKwh(res[c.aux_entity] || 0, aux1Meta.factor);
+          const aux2 = scaleToKwh(res[c.aux_entity2] || 0, aux2Meta.factor);
           const auxTotal = aux1 + aux2;
-          
-          // LOGIKA: Pokud je aux_included=true, nejpřičítáme ho k hlavní spotřebě pro výpočet COP
+
           const totalConsForCalc = (consMain != null) ? (c.aux_included ? consMain : (consMain + auxTotal)) : null;
           const ratio = (prod != null && totalConsForCalc > 0) ? (prod / totalConsForCalc) : null;
 
-          cat.periods[p.key] = { produced_kwh: prod, consumed_kwh: consMain, aux1_kwh: aux1, aux2_kwh: aux2, aux_total_kwh: (res[c.aux_entity] != null || res[c.aux_entity2] != null) ? auxTotal : null, consumed_total_kwh: totalConsForCalc, ratio };
+          cat.periods[p.key] = { produced_kwh: prod, consumed_kwh: consMain, aux1_kwh: aux1, aux2_kwh: aux2, aux_total_kwh: (res[c.aux_entity] != null || res[c.aux_entity2] != null) ? auxTotal : null, consumed_total_kwh: totalConsForCalc, ratio, unit: "kWh" };
         }
         categories[c.key] = cat;
       }
       this._data = { categories };
       this._saveCache(this._data);
+      this._warning = warnings.size ? `${t(this.hass, "unit_warning", this._config)} ${Array.from(warnings).join(", ")}` : null;
       this._lastFetch = Date.now();
     } catch (e) { this._error = `Error: ${e?.message || e}`; } finally { this._loading = false; }
   }
@@ -347,14 +388,14 @@ class CopScopCard extends LitElement {
               <div class="tileTop"><div class="tileLabel">${(p.kind === "scop" ? "SCOP " : "COP ") + p.label}</div>${thresholds ? this._badge(pickClass(m.ratio, thresholds), true) : nothing}</div>
               <div class="value">${formatNum(m.ratio, prec)}</div>
               <div class="meta">
-                <div class="metaRow"><div>${t(this.hass, "produced", this._config)}:</div><div class="muted">${formatNum(m.produced_kwh, 2)} kWh</div></div>
-                <div class="metaRow"><div>${t(this.hass, "consumed", this._config)}:</div><div class="muted">${formatNum(m.consumed_kwh, 2)} kWh</div></div>
+                <div class="metaRow"><div>${t(this.hass, "produced", this._config)}:</div><div class="muted">${formatNum(m.produced_kwh, 2)} ${m.unit || "kWh"}</div></div>
+                <div class="metaRow"><div>${t(this.hass, "consumed", this._config)}:</div><div class="muted">${formatNum(m.consumed_kwh, 2)} ${m.unit || "kWh"}</div></div>
                 ${m.aux_total_kwh != null ? html`
                   ${cat.key === "total" ? html`
-                    <div class="metaRow"><div>${t(this.hass, "aux_from", this._config)} (Top):</div><div class="muted">${formatNum(m.aux1_kwh, 2)} kWh</div></div>
-                    <div class="metaRow"><div>${t(this.hass, "aux_from", this._config)} (TUV):</div><div class="muted">${formatNum(m.aux2_kwh, 2)} kWh</div></div>
-                  ` : html`<div class="metaRow"><div>${t(this.hass, "aux_from", this._config)}:</div><div class="muted">${formatNum(m.aux_total_kwh, 2)} kWh</div></div>`}
-                  <div class="metaRow"><div>${t(this.hass, "total_consumed", this._config)}:</div><div class="muted">${formatNum(m.consumed_total_kwh, 2)} kWh</div></div>
+                    <div class="metaRow"><div>${t(this.hass, "aux_from", this._config)} (Top):</div><div class="muted">${formatNum(m.aux1_kwh, 2)} ${m.unit || "kWh"}</div></div>
+                    <div class="metaRow"><div>${t(this.hass, "aux_from", this._config)} (TUV):</div><div class="muted">${formatNum(m.aux2_kwh, 2)} ${m.unit || "kWh"}</div></div>
+                  ` : html`<div class="metaRow"><div>${t(this.hass, "aux_from", this._config)}:</div><div class="muted">${formatNum(m.aux_total_kwh, 2)} ${m.unit || "kWh"}</div></div>`}
+                  <div class="metaRow"><div>${t(this.hass, "total_consumed", this._config)}:</div><div class="muted">${formatNum(m.consumed_total_kwh, 2)} ${m.unit || "kWh"}</div></div>
                 ` : nothing}
               </div>
             </div>
@@ -383,6 +424,7 @@ class CopScopCard extends LitElement {
               </table>
             </div>
           `}
+          ${this._warning ? html`<div class="err">${this._warning}</div>` : nothing}
           ${this._error ? html`<div class="err">${this._error}</div>` : nothing}
         </div>
       </ha-card>
@@ -440,8 +482,12 @@ class CopScopCardEditor extends LitElement {
                 { name: "enabled", label: t(this.hass, "enabled", this._config), selector: { boolean: {} } },
                 { name: "produced_entity", label: t(this.hass, "produced_entity", this._config), selector: { entity: {} } },
                 { name: "consumed_entity", label: t(this.hass, "consumed_entity", this._config), selector: { entity: {} } },
+                { name: "produced_scale", label: t(this.hass, "produced_scale", this._config), selector: { number: { min: 0.000001, max: 1000000, step: 0.000001, mode: "box" } } },
+                { name: "consumed_scale", label: t(this.hass, "consumed_scale", this._config), selector: { number: { min: 0.000001, max: 1000000, step: 0.000001, mode: "box" } } },
                 { name: "aux_entity", label: t(this.hass, "add_aux", this._config), selector: { entity: {} } },
+                { name: "aux_scale", label: t(this.hass, "aux_scale", this._config), selector: { number: { min: 0.000001, max: 1000000, step: 0.000001, mode: "box" } } },
                 ...(c.key === "total" ? [{ name: "aux_entity2", label: t(this.hass, "add_aux2", this._config), selector: { entity: {} } }] : []),
+                ...(c.key === "total" ? [{ name: "aux2_scale", label: t(this.hass, "aux2_scale", this._config), selector: { number: { min: 0.000001, max: 1000000, step: 0.000001, mode: "box" } } }] : []),
                 { name: "aux_included", label: t(this.hass, "aux_included", this._config), selector: { boolean: {} } },
               ]} @value-changed=${(e) => this._setCategory(idx, e.detail.value)}></ha-form>
               <div class="hr"></div>

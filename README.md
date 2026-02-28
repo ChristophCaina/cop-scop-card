@@ -19,8 +19,10 @@ It uses Home Assistant's **Long-Term Statistics** to calculate efficiency over d
 ## Features
 
 *   **Real-time Calculation**: Calculates COP/SCOP dynamically from produced heat and consumed energy entities.
+*   **Automatic Unit Normalization**: Auto-detects `Wh`, `kWh`, and `MWh` and converts everything internally to `kWh`.
 *   **Multiple Periods**: Displays statistics for 24h, 7 days, Month (configurable days), and Year (configurable days).
 *   **Auxiliary Heaters**: Supports adding auxiliary heater consumption (e.g., electric back-up) to the calculation. Can handle cases where the aux heater is already included in the main sensor or separate.
+*   **Manual Scale Overrides**: Allows per-entity overrides when `unit_of_measurement` is missing or non-standard.
 *   **Energy Classes**: Visualizes efficiency classes (A+++ to G) based on custom thresholds or EU standards (ETA_s).
 *   **Two Modes**:
     *   **Single**: Detailed view with tiles for a specific category.
@@ -193,6 +195,21 @@ categories:
     consumed_entity: sensor.hp_heat_consumed
 ```
 
+### Mixed units with manual overrides
+
+```yaml
+type: custom:cop-scop-card
+title: Mixed Units
+mode: single
+categories:
+  - key: heating
+    name: Heating
+    enabled: true
+    produced_entity: sensor.hp_heat_produced_wh
+    consumed_entity: sensor.hp_heat_consumed_kwh
+    produced_scale: 0.001 # Optional override to convert source value to kWh
+```
+
 ## Configuration
 
 The card supports the visual editor. Simply add the "COP/SCOP Card" to your dashboard and configure it via the UI.
@@ -212,7 +229,10 @@ categories:
     enabled: true
     produced_entity: sensor.heat_pump_heating_energy_produced
     consumed_entity: sensor.heat_pump_heating_energy_consumed
+    produced_scale: 0.001 # Optional. Use when entity unit metadata is wrong/missing (for Wh -> kWh)
+    consumed_scale: 1 # Optional. Scale override applied before COP calculation
     aux_entity: sensor.aux_heater_energy
+    aux_scale: 0.001 # Optional. Same logic for aux entities
     aux_included: false # Set to true if consumed_entity already includes aux_entity
   - key: dhw
     name: Hot Water
@@ -225,7 +245,24 @@ categories:
     consumed_entity: sensor.heat_pump_total_energy_consumed
     aux_entity: sensor.aux_heater_heating_energy # e.g. aux for heating
     aux_entity2: sensor.aux_heater_dhw_energy # e.g. aux for DHW
+    aux2_scale: 0.001 # Optional override for aux_entity2
 ```
+
+The card normalizes all energy values to `kWh` before computing COP/SCOP. Supported automatic units are `Wh`, `kWh`, and `MWh`. If an entity exposes a different or missing `unit_of_measurement`, you can set `produced_scale`, `consumed_scale`, `aux_scale`, or `aux2_scale` manually.
+
+## Changelog
+
+### 1.4.0
+
+* Added automatic normalization of `Wh`, `kWh`, and `MWh` to `kWh`.
+* Added manual per-entity scale overrides: `produced_scale`, `consumed_scale`, `aux_scale`, `aux2_scale`.
+* Added warning when an entity uses an unsupported unit without a manual override.
+* Updated documentation with mixed-unit examples.
+
+### 1.3.5
+
+* Added `aux_included` toggle for more accurate COP calculation when auxiliary heating is already part of the main consumption sensor.
+* Improved caching and editor behavior.
 
 ## Support
 
